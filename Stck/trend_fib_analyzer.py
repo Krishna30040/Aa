@@ -267,31 +267,26 @@ def determine_ema_trend(candles: list[Candle]) -> tuple[str, str, Optional[float
     if last_ema200 is None:
         if last_price > last_ema50:
             return UPTREND, "price above EMA50 (EMA200 unavailable)", last_ema50, None
-        if last_price < last_ema50:
-            return DOWNTREND, "price below EMA50 (EMA200 unavailable)", last_ema50, None
-        return NEUTRAL, "price equals EMA50 (EMA200 unavailable)", last_ema50, None
+        return DOWNTREND, "price at/below EMA50 (EMA200 unavailable)", last_ema50, None
 
-    if last_price > last_ema50 > last_ema200:
-        return UPTREND, "price > EMA50 > EMA200", last_ema50, last_ema200
-    if last_price < last_ema50 < last_ema200:
-        return DOWNTREND, "price < EMA50 < EMA200", last_ema50, last_ema200
-
-    # Additional rule: above EMA200 is uptrend, otherwise downtrend.
+    # Primary EMA rule requested: above EMA200 => uptrend, otherwise downtrend.
     if last_price > last_ema200:
-        return UPTREND, "price above EMA200 (fallback rule)", last_ema50, last_ema200
-    return DOWNTREND, "price at/below EMA200 (fallback rule)", last_ema50, last_ema200
+        if last_price > last_ema50:
+            return UPTREND, "price above EMA200 (also above EMA50)", last_ema50, last_ema200
+        return UPTREND, "price above EMA200 (below EMA50)", last_ema50, last_ema200
+
+    if last_price < last_ema50 < last_ema200:
+        return DOWNTREND, "price below EMA200 (also below EMA50)", last_ema50, last_ema200
+    return DOWNTREND, "price at/below EMA200", last_ema50, last_ema200
 
 
 def combine_trend(structure_trend: str, ema_trend: str) -> str:
     directional = {UPTREND, DOWNTREND}
-    if structure_trend == ema_trend and structure_trend in directional:
-        return structure_trend
-    if structure_trend in directional and ema_trend == NEUTRAL:
-        return structure_trend
-    if ema_trend in directional and structure_trend == NEUTRAL:
+    # EMA trend is dominant for final trend direction.
+    if ema_trend in directional:
         return ema_trend
-    if structure_trend in directional and ema_trend in directional and structure_trend != ema_trend:
-        return MIXED
+    if structure_trend in directional:
+        return structure_trend
     return NEUTRAL
 
 
@@ -572,9 +567,9 @@ def analyze_ticker(
 
     structure_trend, structure_reason = determine_structure_trend(swings)
 
-    # EMA is trend smoother; use range bars when enough exist, otherwise raw candles.
-    ema_source_name = "range_bars" if len(range_bars) >= 50 else "raw_candles"
-    ema_source = range_bars if len(range_bars) >= 50 else candles
+    # EMA trend is computed on raw OHLC candles to match chart EMA readings.
+    ema_source_name = "raw_candles"
+    ema_source = candles
     ema_trend, ema_reason, ema50, ema200 = determine_ema_trend(ema_source)
     final_trend = combine_trend(structure_trend, ema_trend)
 
@@ -650,6 +645,7 @@ def print_ticker_terminal_summary(analysis: dict) -> None:
     last_low = analysis.get("last_swing_low")
     last_high = analysis.get("last_swing_high")
     current = analysis.get("current_price")
+    ema200 = analysis.get("ema200")
     fib_reference = analysis.get("last_fib_reference")
     fib_status = analysis.get("current_trend_fib_status")
 
@@ -665,6 +661,19 @@ def print_ticker_terminal_summary(analysis: dict) -> None:
         last_high.get("price") if isinstance(last_high, dict) else None,
         last_high.get("timestamp") if isinstance(last_high, dict) else None,
     )
+
+    ema200_text = "n/a"
+    current_price_value: Optional[float] = None
+    if isinstance(current, dict):
+        raw_price = current.get("price")
+        if isinstance(raw_price, (int, float)):
+            current_price_value = float(raw_price)
+    if isinstance(ema200, (int, float)):
+        if current_price_value is not None:
+            relation = "above" if current_price_value > float(ema200) else "at/below"
+            ema200_text = f"{float(ema200):.4f} ({relation})"
+        else:
+            ema200_text = f"{float(ema200):.4f}"
 
     if isinstance(fib_reference, dict):
         fib_value = fib_reference.get("fib_38_2")
@@ -698,6 +707,7 @@ def print_ticker_terminal_summary(analysis: dict) -> None:
 
     print(
         f"{ticker} | Trend: {final_trend} | Current: {current_text} | "
+        f"EMA200: {ema200_text} | "
         f"Last Swing Low: {low_text} | Last Swing High: {high_text} | "
         f"Fib 38.2: {fib_text} | Retraced: {retraced_text} "
         f"(at {retrace_touch_text}) | Held: {held_text}"

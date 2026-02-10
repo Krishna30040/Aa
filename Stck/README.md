@@ -6,7 +6,7 @@ This project implements your workflow:
 2. Download OHLC data from Yahoo Finance.
 3. Convert OHLC timeframe data into range bars using a ticker-specific range size.
 3. Detect structure trend (`HH/HL` for uptrend, `LL/LH` for downtrend).
-4. Detect EMA trend with `EMA50` and `EMA200` (including rule: price above EMA200 = uptrend, otherwise downtrend).
+4. Detect EMA trend from raw OHLC candles with `EMA50` and `EMA200` (price above EMA200 = uptrend, otherwise downtrend).
 5. In trend direction, check if retracement reaches 38.2% and holds.
 6. If continuation happens, promote new fib anchors and keep scanning.
 7. Mark all 38.2% touches as `hit`.
