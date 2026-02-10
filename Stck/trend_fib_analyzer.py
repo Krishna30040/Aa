@@ -88,6 +88,31 @@ def read_watchlist(path: Path) -> list[str]:
     return symbols
 
 
+def normalize_period_for_interval(period: str, interval: str) -> str:
+    # Yahoo limits intraday intervals to relatively short lookback windows.
+    interval_max_days = {
+        "1m": 7,
+        "2m": 60,
+        "5m": 60,
+        "15m": 60,
+        "30m": 60,
+        "90m": 60,
+    }
+    max_days = interval_max_days.get(interval)
+    if max_days is None:
+        return period
+
+    if period.endswith("d"):
+        try:
+            requested_days = int(period[:-1])
+            if requested_days <= max_days:
+                return period
+        except ValueError:
+            pass
+
+    return f"{max_days}d"
+
+
 def download_ohlc_from_yahoo(
     ticker: str,
     period: str,
@@ -717,6 +742,9 @@ def print_ticker_terminal_summary(analysis: dict) -> None:
 def main() -> int:
     watchlist_path = WATCHLIST_PATH.resolve()
     output_path = OUTPUT_PATH.resolve()
+    effective_period = normalize_period_for_interval(
+        period=YAHOO_PERIOD, interval=YAHOO_INTERVAL
+    )
 
     if not watchlist_path.exists():
         raise FileNotFoundError(f"Watchlist file not found: {watchlist_path}")
@@ -725,13 +753,19 @@ def main() -> int:
     if not tickers:
         raise ValueError(f"No symbols found in watchlist: {watchlist_path}")
 
+    if effective_period != YAHOO_PERIOD:
+        print(
+            f"Yahoo constraint: interval {YAHOO_INTERVAL} supports up to {effective_period}. "
+            f"Using {effective_period} instead of requested {YAHOO_PERIOD}."
+        )
+
     missing_or_failed: list[str] = []
     analyses: list[dict] = []
 
     for ticker in tickers:
         candles = download_ohlc_from_yahoo(
             ticker=ticker,
-            period=YAHOO_PERIOD,
+            period=effective_period,
             interval=YAHOO_INTERVAL,
             auto_adjust=YAHOO_AUTO_ADJUST,
         )
@@ -756,7 +790,9 @@ def main() -> int:
         .replace("+00:00", "Z"),
         "watchlist_file": str(watchlist_path),
         "data_source": "yahoo_finance",
-        "yahoo_period": YAHOO_PERIOD,
+        "yahoo_period_requested": YAHOO_PERIOD,
+        "yahoo_period_used": effective_period,
+        "yahoo_period": effective_period,
         "yahoo_interval": YAHOO_INTERVAL,
         "yahoo_auto_adjust": YAHOO_AUTO_ADJUST,
         "settings": {

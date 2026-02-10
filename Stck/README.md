@@ -45,6 +45,10 @@ All runtime inputs are hardcoded at the top of `trend_fib_analyzer.py`:
 
 Edit those constants directly in the script when needed.
 
+Note: Yahoo intraday intervals have lookback limits (for example, `15m` is
+limited to about 60 days). The script automatically clamps period to Yahoo's
+allowed range and prints the effective period used.
+
 ## Install and run
 
 From `Stck/`:
