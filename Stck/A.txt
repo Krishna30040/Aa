@@ -1,1 +1,4 @@
-
+# One ticker symbol per line.
+# Example:
+# AAPL
+# MSFT
