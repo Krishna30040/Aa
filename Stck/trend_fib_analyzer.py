@@ -291,6 +291,83 @@ def combine_trend(structure_trend: str, ema_trend: str) -> str:
     return NEUTRAL
 
 
+def _latest_swing_by_kind(swings: list[SwingPoint], kind: str) -> Optional[SwingPoint]:
+    for point in reversed(swings):
+        if point.kind == kind:
+            return point
+    return None
+
+
+def _build_fib_reference(
+    trend: str,
+    low_point: SwingPoint,
+    high_point: SwingPoint,
+    source: str,
+) -> Optional[dict]:
+    move = high_point.price - low_point.price
+    if move <= 0:
+        return None
+
+    if trend == UPTREND:
+        fib_38_2 = high_point.price - (move * 0.382)
+    elif trend == DOWNTREND:
+        fib_38_2 = low_point.price + (move * 0.382)
+    else:
+        return None
+
+    return {
+        "source": source,
+        "trend": trend,
+        "fib_low_time": low_point.timestamp,
+        "fib_low": low_point.price,
+        "fib_high_time": high_point.timestamp,
+        "fib_high": high_point.price,
+        "fib_38_2": fib_38_2,
+    }
+
+
+def derive_latest_fib_reference(
+    swings: list[SwingPoint], final_trend: str, fib_hits: list[FibHit]
+) -> Optional[dict]:
+    if fib_hits:
+        last_hit = fib_hits[-1]
+        return {
+            "source": "last_fib_hit",
+            "trend": last_hit.trend,
+            "fib_low_time": last_hit.fib_low_time,
+            "fib_low": last_hit.fib_low,
+            "fib_high_time": last_hit.fib_high_time,
+            "fib_high": last_hit.fib_high,
+            "fib_38_2": last_hit.fib_38_2,
+        }
+
+    # No fib hits: derive last analyzed fib anchors from recent swings.
+    preferred_patterns: list[tuple[str, str, str]]
+    if final_trend == UPTREND:
+        preferred_patterns = [(UPTREND, "L", "H")]
+    elif final_trend == DOWNTREND:
+        preferred_patterns = [(DOWNTREND, "H", "L")]
+    else:
+        preferred_patterns = [(UPTREND, "L", "H"), (DOWNTREND, "H", "L")]
+
+    for trend, first_kind, second_kind in preferred_patterns:
+        for idx in range(len(swings) - 2, -1, -1):
+            first = swings[idx]
+            second = swings[idx + 1]
+            if first.kind != first_kind or second.kind != second_kind:
+                continue
+            if trend == UPTREND:
+                low_point, high_point = first, second
+            else:
+                high_point, low_point = first, second
+            reference = _build_fib_reference(
+                trend=trend, low_point=low_point, high_point=high_point, source="derived_swings"
+            )
+            if reference is not None:
+                return reference
+    return None
+
+
 def scan_uptrend_fib_hits(swings: list[SwingPoint], tolerance_ratio: float) -> list[FibHit]:
     hits: list[FibHit] = []
     idx = 0
@@ -427,6 +504,13 @@ def analyze_ticker(
         fib_hits = scan_uptrend_fib_hits(swings, tolerance_ratio=tolerance_ratio)
         fib_hits.extend(scan_downtrend_fib_hits(swings, tolerance_ratio=tolerance_ratio))
 
+    last_swing_low = _latest_swing_by_kind(swings, "L")
+    last_swing_high = _latest_swing_by_kind(swings, "H")
+    latest_fib_reference = derive_latest_fib_reference(
+        swings=swings, final_trend=final_trend, fib_hits=fib_hits
+    )
+    current_candle = candles[-1]
+
     return {
         "ticker": ticker,
         "raw_candle_count": len(candles),
@@ -442,9 +526,64 @@ def analyze_ticker(
         "ema50": ema50,
         "ema200": ema200,
         "final_trend": final_trend,
+        "current_price": {
+            "timestamp": current_candle.timestamp,
+            "price": current_candle.close,
+        },
+        "last_swing_low": asdict(last_swing_low) if last_swing_low else None,
+        "last_swing_high": asdict(last_swing_high) if last_swing_high else None,
+        "last_fib_reference": latest_fib_reference,
         "fib_hit_count": len(fib_hits),
         "fib_hits": [asdict(hit) for hit in fib_hits],
     }
+
+
+def _format_price_time(value: Optional[float], timestamp: Optional[str]) -> str:
+    if value is None or timestamp is None:
+        return "n/a"
+    return f"{value:.4f} @ {timestamp}"
+
+
+def print_ticker_terminal_summary(analysis: dict) -> None:
+    ticker = analysis.get("ticker", "UNKNOWN")
+    last_low = analysis.get("last_swing_low")
+    last_high = analysis.get("last_swing_high")
+    current = analysis.get("current_price")
+    fib_reference = analysis.get("last_fib_reference")
+
+    current_text = _format_price_time(
+        current.get("price") if isinstance(current, dict) else None,
+        current.get("timestamp") if isinstance(current, dict) else None,
+    )
+    low_text = _format_price_time(
+        last_low.get("price") if isinstance(last_low, dict) else None,
+        last_low.get("timestamp") if isinstance(last_low, dict) else None,
+    )
+    high_text = _format_price_time(
+        last_high.get("price") if isinstance(last_high, dict) else None,
+        last_high.get("timestamp") if isinstance(last_high, dict) else None,
+    )
+
+    if isinstance(fib_reference, dict):
+        fib_value = fib_reference.get("fib_38_2")
+        fib_low = _format_price_time(
+            fib_reference.get("fib_low"), fib_reference.get("fib_low_time")
+        )
+        fib_high = _format_price_time(
+            fib_reference.get("fib_high"), fib_reference.get("fib_high_time")
+        )
+        if isinstance(fib_value, (int, float)):
+            fib_text = f"{float(fib_value):.4f} | low {fib_low} -> high {fib_high}"
+        else:
+            fib_text = "n/a"
+    else:
+        fib_text = "n/a"
+
+    print(
+        f"{ticker} | Current: {current_text} | "
+        f"Last Swing Low: {low_text} | Last Swing High: {high_text} | "
+        f"Fib 38.2: {fib_text}"
+    )
 
 
 def main() -> int:
@@ -472,16 +611,16 @@ def main() -> int:
             missing_or_failed.append(ticker)
             continue
 
-        analyses.append(
-            analyze_ticker(
-                ticker=ticker,
-                candles=candles,
-                range_lookback=max(2, RANGE_LOOKBACK),
-                range_factor=max(1e-6, RANGE_FACTOR),
-                pivot_span=max(1, PIVOT_SPAN),
-                tolerance_ratio=max(0.0, FIB_TOLERANCE),
-            )
+        analysis = analyze_ticker(
+            ticker=ticker,
+            candles=candles,
+            range_lookback=max(2, RANGE_LOOKBACK),
+            range_factor=max(1e-6, RANGE_FACTOR),
+            pivot_span=max(1, PIVOT_SPAN),
+            tolerance_ratio=max(0.0, FIB_TOLERANCE),
         )
+        analyses.append(analysis)
+        print_ticker_terminal_summary(analysis)
 
     report = {
         "generated_at_utc": datetime.now(timezone.utc)

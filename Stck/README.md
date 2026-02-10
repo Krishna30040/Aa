@@ -60,5 +60,14 @@ The JSON output includes per-ticker:
 
 - range box size used
 - structure trend + EMA trend + combined trend
+- current price + timestamp
+- latest swing low/high + timestamps
+- latest fib 38.2 reference with anchor timestamps
 - iterative 38.2% fib hit records (`hit`, `held_level`, `continuation`)
 - generated file path: `analysis_output.json` (or your hardcoded `OUTPUT_PATH`)
+
+The script also prints a concise per-ticker line in terminal output showing:
+
+- current price and timestamp
+- last analyzed swing low and swing high with timestamps
+- latest fib 38.2 level with fib low/high anchors and timestamps
