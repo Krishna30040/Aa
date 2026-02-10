@@ -5,11 +5,12 @@ This project implements your workflow:
 1. Read ticker symbols from a watchlist text file.
 2. Download OHLC data from Yahoo Finance.
 3. Convert OHLC timeframe data into range bars using a ticker-specific range size.
-3. Detect structure trend (`HH/HL` for uptrend, `LL/LH` for downtrend).
-4. Detect EMA trend from raw OHLC candles with `EMA50` and `EMA200` (price above EMA200 = uptrend, otherwise downtrend).
-5. In trend direction, check if retracement reaches 38.2% and holds.
-6. If continuation happens, promote new fib anchors and keep scanning.
-7. Mark all 38.2% touches as `hit`.
+4. Detect swing highs/lows with ZigZag on raw candles (widely used approach).
+5. Detect structure trend (`HH/HL` for uptrend, `LL/LH` for downtrend).
+6. Detect EMA trend from raw OHLC candles with `EMA50` and `EMA200` (price above EMA200 = uptrend, otherwise downtrend).
+7. In trend direction, check if retracement reaches 38.2% and holds.
+8. If continuation happens, promote new fib anchors and keep scanning.
+9. Mark all 38.2% touches as `hit`.
 
 ## Files
 
@@ -41,6 +42,7 @@ All runtime inputs are hardcoded at the top of `trend_fib_analyzer.py`:
 - `RANGE_LOOKBACK`
 - `RANGE_FACTOR`
 - `PIVOT_SPAN`
+- `ZIGZAG_REVERSAL_PCT`
 - `FIB_TOLERANCE`
 
 Edit those constants directly in the script when needed.
@@ -48,6 +50,9 @@ Edit those constants directly in the script when needed.
 Note: Yahoo intraday intervals have lookback limits (for example, `15m` is
 limited to about 60 days). The script automatically clamps period to Yahoo's
 allowed range and prints the effective period used.
+
+The script prefers ZigZag swing detection (`zigzag` package) and will fall back
+to local pivot-based detection only if ZigZag is unavailable.
 
 ## Install and run
 

@@ -19,7 +19,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
 import yfinance as yf
+
+try:
+    from zigzag import peak_valley_pivots
+except Exception:
+    peak_valley_pivots = None
 
 
 UPTREND = "uptrend"
@@ -40,6 +46,7 @@ YAHOO_AUTO_ADJUST = False
 RANGE_LOOKBACK = 100
 RANGE_FACTOR = 0.25
 PIVOT_SPAN = 2
+ZIGZAG_REVERSAL_PCT = 0.03
 FIB_TOLERANCE = 0.05
 
 
@@ -197,15 +204,15 @@ def to_range_bars(candles: list[Candle], box_size: float) -> list[Candle]:
     return range_bars
 
 
-def detect_swings(range_bars: list[Candle], pivot_span: int = 2) -> list[SwingPoint]:
-    if len(range_bars) < (pivot_span * 2 + 1):
+def detect_swings_pivot(candles: list[Candle], pivot_span: int = 2) -> list[SwingPoint]:
+    if len(candles) < (pivot_span * 2 + 1):
         return []
 
     raw: list[SwingPoint] = []
-    for idx in range(pivot_span, len(range_bars) - pivot_span):
-        curr = range_bars[idx]
-        left = range_bars[idx - pivot_span : idx]
-        right = range_bars[idx + 1 : idx + pivot_span + 1]
+    for idx in range(pivot_span, len(candles) - pivot_span):
+        curr = candles[idx]
+        left = candles[idx - pivot_span : idx]
+        right = candles[idx + 1 : idx + pivot_span + 1]
         neighbors = left + right
 
         if all(curr.high >= bar.high for bar in neighbors) and any(
@@ -238,6 +245,70 @@ def detect_swings(range_bars: list[Candle], pivot_span: int = 2) -> list[SwingPo
         else:
             filtered.append(point)
     return filtered
+
+
+def detect_swings_zigzag(
+    candles: list[Candle], reversal_pct: float = ZIGZAG_REVERSAL_PCT
+) -> list[SwingPoint]:
+    if len(candles) < 3:
+        return []
+    if reversal_pct <= 0:
+        return []
+    if peak_valley_pivots is None:
+        return []
+
+    close_prices = np.array([bar.close for bar in candles], dtype=float)
+    if close_prices.size < 3:
+        return []
+
+    pivots = peak_valley_pivots(close_prices, reversal_pct, -reversal_pct)
+    swings: list[SwingPoint] = []
+    for idx, marker in enumerate(pivots):
+        if marker == 1:
+            swings.append(
+                SwingPoint(
+                    index=idx,
+                    timestamp=candles[idx].timestamp,
+                    price=candles[idx].high,
+                    kind="H",
+                )
+            )
+        elif marker == -1:
+            swings.append(
+                SwingPoint(
+                    index=idx,
+                    timestamp=candles[idx].timestamp,
+                    price=candles[idx].low,
+                    kind="L",
+                )
+            )
+
+    if not swings:
+        return []
+
+    filtered: list[SwingPoint] = [swings[0]]
+    for point in swings[1:]:
+        prev = filtered[-1]
+        if point.kind == prev.kind:
+            if point.kind == "H" and point.price >= prev.price:
+                filtered[-1] = point
+            elif point.kind == "L" and point.price <= prev.price:
+                filtered[-1] = point
+        else:
+            filtered.append(point)
+    return filtered
+
+
+def detect_swings(
+    candles: list[Candle],
+    pivot_span: int = 2,
+    reversal_pct: float = ZIGZAG_REVERSAL_PCT,
+) -> list[SwingPoint]:
+    # Prefer ZigZag pivots (widely used swing method), fallback to local pivots.
+    swings = detect_swings_zigzag(candles=candles, reversal_pct=reversal_pct)
+    if swings:
+        return swings
+    return detect_swings_pivot(candles=candles, pivot_span=pivot_span)
 
 
 def determine_structure_trend(swings: list[SwingPoint]) -> tuple[str, str]:
@@ -578,17 +649,25 @@ def analyze_ticker(
     )
     range_bars = to_range_bars(candles, ticker_range)
 
-    # Prefer range bars for swing structure. If there are too few bars/swings,
-    # fall back to raw candles and a tighter pivot span.
-    structure_source_name = "range_bars"
-    structure_source = range_bars
-    if len(structure_source) < (pivot_span * 2 + 1):
-        structure_source_name = "raw_candles"
-        structure_source = candles
-
-    swings = detect_swings(structure_source, pivot_span=pivot_span)
-    if not swings and pivot_span > 1:
-        swings = detect_swings(structure_source, pivot_span=1)
+    zigzag_enabled = peak_valley_pivots is not None
+    structure_source_name = (
+        "zigzag_raw_candles" if zigzag_enabled else "pivot_raw_candles_fallback"
+    )
+    swings = detect_swings(
+        candles,
+        pivot_span=pivot_span,
+        reversal_pct=ZIGZAG_REVERSAL_PCT,
+    )
+    # Last-resort fallback in difficult data so analysis still runs.
+    if not swings and range_bars:
+        structure_source_name = (
+            "zigzag_range_bars" if zigzag_enabled else "pivot_range_bars_fallback"
+        )
+        swings = detect_swings(
+            range_bars,
+            pivot_span=pivot_span,
+            reversal_pct=ZIGZAG_REVERSAL_PCT,
+        )
 
     structure_trend, structure_reason = determine_structure_trend(swings)
 
@@ -607,14 +686,8 @@ def analyze_ticker(
         fib_hits = scan_uptrend_fib_hits(swings, tolerance_ratio=tolerance_ratio)
         fib_hits.extend(scan_downtrend_fib_hits(swings, tolerance_ratio=tolerance_ratio))
 
-    # Use raw-candle swings for displayed timestamps so highs/lows map to actual OHLC bars.
-    display_swings = detect_swings(candles, pivot_span=pivot_span)
-    display_swing_source = "raw_candles"
-    if not display_swings and pivot_span > 1:
-        display_swings = detect_swings(candles, pivot_span=1)
-    if not display_swings:
-        display_swings = swings
-        display_swing_source = structure_source_name
+    display_swings = swings
+    display_swing_source = structure_source_name
 
     last_swing_low = _latest_swing_by_kind(display_swings, "L")
     last_swing_high = _latest_swing_by_kind(display_swings, "H")
@@ -634,6 +707,7 @@ def analyze_ticker(
         "range_box_size": ticker_range,
         "range_bar_count": len(range_bars),
         "structure_source": structure_source_name,
+        "zigzag_reversal_pct": ZIGZAG_REVERSAL_PCT,
         "swing_count": len(swings),
         "display_swing_source": display_swing_source,
         "display_swing_count": len(display_swings),
@@ -758,6 +832,11 @@ def main() -> int:
             f"Yahoo constraint: interval {YAHOO_INTERVAL} supports up to {effective_period}. "
             f"Using {effective_period} instead of requested {YAHOO_PERIOD}."
         )
+    if peak_valley_pivots is None:
+        print(
+            "ZigZag package not available. Falling back to local pivot swing detection. "
+            "Install requirements.txt to enable ZigZag swings."
+        )
 
     missing_or_failed: list[str] = []
     analyses: list[dict] = []
@@ -799,8 +878,10 @@ def main() -> int:
             "range_lookback": RANGE_LOOKBACK,
             "range_factor": RANGE_FACTOR,
             "pivot_span": PIVOT_SPAN,
+            "zigzag_reversal_pct": ZIGZAG_REVERSAL_PCT,
             "tolerance": FIB_TOLERANCE,
         },
+        "zigzag_available": peak_valley_pivots is not None,
         "analyzed_ticker_count": len(analyses),
         "missing_or_failed_tickers": missing_or_failed,
         "results": analyses,
