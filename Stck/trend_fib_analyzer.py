@@ -275,7 +275,11 @@ def determine_ema_trend(candles: list[Candle]) -> tuple[str, str, Optional[float
         return UPTREND, "price > EMA50 > EMA200", last_ema50, last_ema200
     if last_price < last_ema50 < last_ema200:
         return DOWNTREND, "price < EMA50 < EMA200", last_ema50, last_ema200
-    return NEUTRAL, "EMA alignment not directional", last_ema50, last_ema200
+
+    # Additional rule: above EMA200 is uptrend, otherwise downtrend.
+    if last_price > last_ema200:
+        return UPTREND, "price above EMA200 (fallback rule)", last_ema50, last_ema200
+    return DOWNTREND, "price at/below EMA200 (fallback rule)", last_ema50, last_ema200
 
 
 def combine_trend(structure_trend: str, ema_trend: str) -> str:
