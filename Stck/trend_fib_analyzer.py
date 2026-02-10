@@ -33,8 +33,8 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 WATCHLIST_PATH = SCRIPT_DIR / "A.txt"
 OUTPUT_PATH = SCRIPT_DIR / "analysis_output.json"
 
-YAHOO_PERIOD = "1y"
-YAHOO_INTERVAL = "1d"
+YAHOO_PERIOD = "3mo"
+YAHOO_INTERVAL = "15m"
 YAHOO_AUTO_ADJUST = False
 
 RANGE_LOOKBACK = 100
