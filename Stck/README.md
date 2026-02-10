@@ -3,7 +3,8 @@
 This project implements your workflow:
 
 1. Read ticker symbols from a watchlist text file.
-2. Convert OHLC timeframe data into range bars using a ticker-specific range size.
+2. Download OHLC data from Yahoo Finance.
+3. Convert OHLC timeframe data into range bars using a ticker-specific range size.
 3. Detect structure trend (`HH/HL` for uptrend, `LL/LH` for downtrend).
 4. Detect EMA trend with `EMA50` and `EMA200`.
 5. In trend direction, check if retracement reaches 38.2% and holds.
@@ -14,21 +15,7 @@ This project implements your workflow:
 
 - `trend_fib_analyzer.py`: main script
 - `A.txt`: watchlist file (one symbol per line)
-
-## Input format
-
-Create one CSV file per symbol in a data directory, e.g.:
-
-- `data/AAPL.csv`
-- `data/MSFT.csv`
-
-CSV header must include at least:
-
-- `Open`, `High`, `Low`, `Close`
-
-Optional timestamp column names:
-
-- `Timestamp`, `Datetime`, `Date`, or `Time`
+- `requirements.txt`: Python dependency list
 
 ## Watchlist format
 
@@ -42,16 +29,29 @@ NVDA
 
 Blank lines and `# comments` are ignored.
 
-## Run
+## Hardcoded settings (no CLI inputs)
+
+All runtime inputs are hardcoded at the top of `trend_fib_analyzer.py`:
+
+- `WATCHLIST_PATH`
+- `OUTPUT_PATH`
+- `YAHOO_PERIOD`
+- `YAHOO_INTERVAL`
+- `YAHOO_AUTO_ADJUST`
+- `RANGE_LOOKBACK`
+- `RANGE_FACTOR`
+- `PIVOT_SPAN`
+- `FIB_TOLERANCE`
+
+Edit those constants directly in the script when needed.
+
+## Install and run
 
 From `Stck/`:
 
 ```bash
-python trend_fib_analyzer.py \
-  --watchlist A.txt \
-  --data-dir data \
-  --range-factor 0.25 \
-  --output analysis_output.json
+python3 -m pip install -r requirements.txt
+python3 trend_fib_analyzer.py
 ```
 
 ## Output
@@ -61,3 +61,4 @@ The JSON output includes per-ticker:
 - range box size used
 - structure trend + EMA trend + combined trend
 - iterative 38.2% fib hit records (`hit`, `held_level`, `continuation`)
+- generated file path: `analysis_output.json` (or your hardcoded `OUTPUT_PATH`)

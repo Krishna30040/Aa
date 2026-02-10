@@ -3,7 +3,7 @@
 
 Workflow implemented:
 1) Read watchlist symbols from a text file.
-2) Convert OHLC timeframe data into range bars based on each ticker's range size.
+2) Download OHLC data from Yahoo Finance and convert to range bars.
 3) Detect trend from market structure (HH/HL or LL/LH).
 4) Detect trend from EMA50 / EMA200.
 5) In trend direction, check 38.2% retracement behavior.
@@ -13,19 +13,34 @@ Workflow implemented:
 
 from __future__ import annotations
 
-import argparse
-import csv
 import json
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Optional
+
+import yfinance as yf
 
 
 UPTREND = "uptrend"
 DOWNTREND = "downtrend"
 NEUTRAL = "neutral"
 MIXED = "mixed"
+
+
+# Hardcoded runtime settings (no command-line inputs).
+SCRIPT_DIR = Path(__file__).resolve().parent
+WATCHLIST_PATH = SCRIPT_DIR / "A.txt"
+OUTPUT_PATH = SCRIPT_DIR / "analysis_output.json"
+
+YAHOO_PERIOD = "1y"
+YAHOO_INTERVAL = "1d"
+YAHOO_AUTO_ADJUST = False
+
+RANGE_LOOKBACK = 100
+RANGE_FACTOR = 0.25
+PIVOT_SPAN = 2
+FIB_TOLERANCE = 0.05
 
 
 @dataclass
@@ -73,53 +88,42 @@ def read_watchlist(path: Path) -> list[str]:
     return symbols
 
 
-def _find_column(fieldnames: Iterable[str], candidates: list[str]) -> Optional[str]:
-    lowered = {name.lower().strip(): name for name in fieldnames}
-    for candidate in candidates:
-        found = lowered.get(candidate.lower())
-        if found:
-            return found
-    return None
+def download_ohlc_from_yahoo(
+    ticker: str,
+    period: str,
+    interval: str,
+    auto_adjust: bool,
+) -> list[Candle]:
+    try:
+        history = yf.Ticker(ticker).history(
+            period=period,
+            interval=interval,
+            auto_adjust=auto_adjust,
+        )
+    except Exception:
+        return []
+    if history is None or history.empty:
+        return []
 
+    required = {"Open", "High", "Low", "Close"}
+    if not required.issubset(set(history.columns)):
+        return []
 
-def _to_float(raw_value: str) -> float:
-    text = raw_value.strip().replace(",", "")
-    return float(text)
-
-
-def load_ohlc_csv(path: Path) -> list[Candle]:
     candles: list[Candle] = []
-    with path.open("r", encoding="utf-8", newline="") as handle:
-        reader = csv.DictReader(handle)
-        if not reader.fieldnames:
-            raise ValueError(f"{path} has no header row")
+    for timestamp, row in history.iterrows():
+        try:
+            o = float(row["Open"])
+            h = float(row["High"])
+            l = float(row["Low"])
+            c = float(row["Close"])
+        except (TypeError, ValueError, KeyError):
+            continue
 
-        open_col = _find_column(reader.fieldnames, ["open", "o"])
-        high_col = _find_column(reader.fieldnames, ["high", "h"])
-        low_col = _find_column(reader.fieldnames, ["low", "l"])
-        close_col = _find_column(reader.fieldnames, ["close", "c", "adj_close"])
-        time_col = _find_column(reader.fieldnames, ["timestamp", "datetime", "date", "time"])
+        if h < l:
+            h, l = l, h
+        timestamp_text = timestamp.isoformat() if hasattr(timestamp, "isoformat") else str(timestamp)
+        candles.append(Candle(timestamp=timestamp_text, open=o, high=h, low=l, close=c))
 
-        required = [open_col, high_col, low_col, close_col]
-        if any(col is None for col in required):
-            raise ValueError(
-                f"{path} must contain Open/High/Low/Close columns. "
-                f"Found columns: {reader.fieldnames}"
-            )
-
-        for idx, row in enumerate(reader, start=1):
-            try:
-                o = _to_float(row[open_col])  # type: ignore[index]
-                h = _to_float(row[high_col])  # type: ignore[index]
-                l = _to_float(row[low_col])  # type: ignore[index]
-                c = _to_float(row[close_col])  # type: ignore[index]
-            except (TypeError, ValueError, KeyError):
-                continue
-
-            if h < l:
-                h, l = l, h
-            timestamp = str(row.get(time_col, idx)) if time_col else str(idx)
-            candles.append(Candle(timestamp=timestamp, open=o, high=h, low=l, close=c))
     return candles
 
 
@@ -381,18 +385,6 @@ def scan_downtrend_fib_hits(swings: list[SwingPoint], tolerance_ratio: float) ->
     return hits
 
 
-def find_ticker_csv(data_dir: Path, ticker: str) -> Optional[Path]:
-    candidates = [
-        data_dir / f"{ticker}.csv",
-        data_dir / f"{ticker.upper()}.csv",
-        data_dir / f"{ticker.lower()}.csv",
-    ]
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
-    return None
-
-
 def analyze_ticker(
     ticker: str,
     candles: list[Candle],
@@ -455,89 +447,39 @@ def analyze_ticker(
     }
 
 
-def build_cli() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Trend + Fibonacci 38.2 analyzer")
-    parser.add_argument(
-        "--watchlist",
-        default="A.txt",
-        help="Path to watchlist text file (one ticker per line).",
-    )
-    parser.add_argument(
-        "--data-dir",
-        default="data",
-        help="Directory containing per-ticker OHLC CSV files.",
-    )
-    parser.add_argument(
-        "--output",
-        default="analysis_output.json",
-        help="Output JSON path.",
-    )
-    parser.add_argument(
-        "--range-lookback",
-        type=int,
-        default=100,
-        help="Bars used to compute ticker-specific median range size.",
-    )
-    parser.add_argument(
-        "--range-factor",
-        type=float,
-        default=0.25,
-        help="Fraction of median ticker range used as range-bar box size.",
-    )
-    parser.add_argument(
-        "--pivot-span",
-        type=int,
-        default=2,
-        help="Bars on each side used for swing-high/swing-low detection.",
-    )
-    parser.add_argument(
-        "--tolerance",
-        type=float,
-        default=0.05,
-        help="Tolerance ratio around 38.2%% level (fraction of swing size).",
-    )
-    return parser
-
-
 def main() -> int:
-    parser = build_cli()
-    args = parser.parse_args()
-
-    watchlist_path = Path(args.watchlist).expanduser().resolve()
-    data_dir = Path(args.data_dir).expanduser().resolve()
-    output_path = Path(args.output).expanduser().resolve()
+    watchlist_path = WATCHLIST_PATH.resolve()
+    output_path = OUTPUT_PATH.resolve()
 
     if not watchlist_path.exists():
         raise FileNotFoundError(f"Watchlist file not found: {watchlist_path}")
-    if not data_dir.exists():
-        raise FileNotFoundError(f"Data directory not found: {data_dir}")
 
     tickers = read_watchlist(watchlist_path)
     if not tickers:
         raise ValueError(f"No symbols found in watchlist: {watchlist_path}")
 
-    missing_data: list[str] = []
+    missing_or_failed: list[str] = []
     analyses: list[dict] = []
 
     for ticker in tickers:
-        csv_path = find_ticker_csv(data_dir, ticker)
-        if csv_path is None:
-            missing_data.append(ticker)
-            continue
-
-        candles = load_ohlc_csv(csv_path)
+        candles = download_ohlc_from_yahoo(
+            ticker=ticker,
+            period=YAHOO_PERIOD,
+            interval=YAHOO_INTERVAL,
+            auto_adjust=YAHOO_AUTO_ADJUST,
+        )
         if len(candles) < 3:
-            missing_data.append(ticker)
+            missing_or_failed.append(ticker)
             continue
 
         analyses.append(
             analyze_ticker(
                 ticker=ticker,
                 candles=candles,
-                range_lookback=max(2, args.range_lookback),
-                range_factor=max(1e-6, args.range_factor),
-                pivot_span=max(1, args.pivot_span),
-                tolerance_ratio=max(0.0, args.tolerance),
+                range_lookback=max(2, RANGE_LOOKBACK),
+                range_factor=max(1e-6, RANGE_FACTOR),
+                pivot_span=max(1, PIVOT_SPAN),
+                tolerance_ratio=max(0.0, FIB_TOLERANCE),
             )
         )
 
@@ -546,15 +488,18 @@ def main() -> int:
         .isoformat(timespec="seconds")
         .replace("+00:00", "Z"),
         "watchlist_file": str(watchlist_path),
-        "data_directory": str(data_dir),
+        "data_source": "yahoo_finance",
+        "yahoo_period": YAHOO_PERIOD,
+        "yahoo_interval": YAHOO_INTERVAL,
+        "yahoo_auto_adjust": YAHOO_AUTO_ADJUST,
         "settings": {
-            "range_lookback": args.range_lookback,
-            "range_factor": args.range_factor,
-            "pivot_span": args.pivot_span,
-            "tolerance": args.tolerance,
+            "range_lookback": RANGE_LOOKBACK,
+            "range_factor": RANGE_FACTOR,
+            "pivot_span": PIVOT_SPAN,
+            "tolerance": FIB_TOLERANCE,
         },
         "analyzed_ticker_count": len(analyses),
-        "missing_data_tickers": missing_data,
+        "missing_or_failed_tickers": missing_or_failed,
         "results": analyses,
     }
 
@@ -563,8 +508,8 @@ def main() -> int:
         json.dump(report, handle, indent=2)
 
     print(f"Analyzed: {len(analyses)} ticker(s)")
-    if missing_data:
-        print(f"Missing/invalid data for: {', '.join(missing_data)}")
+    if missing_or_failed:
+        print(f"No Yahoo data or insufficient data for: {', '.join(missing_or_failed)}")
     print(f"Output written to: {output_path}")
     return 0
 
