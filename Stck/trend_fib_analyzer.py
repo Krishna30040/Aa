@@ -368,6 +368,85 @@ def derive_latest_fib_reference(
     return None
 
 
+def _find_candle_index_by_timestamp(candles: list[Candle], timestamp: str) -> Optional[int]:
+    for idx, candle in enumerate(candles):
+        if candle.timestamp == timestamp:
+            return idx
+    return None
+
+
+def evaluate_current_trend_fib_status(
+    candles: list[Candle], fib_reference: Optional[dict], tolerance_ratio: float
+) -> Optional[dict]:
+    if not fib_reference:
+        return None
+
+    trend = fib_reference.get("trend")
+    fib_level = fib_reference.get("fib_38_2")
+    fib_low = fib_reference.get("fib_low")
+    fib_high = fib_reference.get("fib_high")
+    fib_low_time = fib_reference.get("fib_low_time")
+    fib_high_time = fib_reference.get("fib_high_time")
+
+    if trend not in {UPTREND, DOWNTREND}:
+        return None
+    if not isinstance(fib_level, (int, float)):
+        return None
+    if not isinstance(fib_low, (int, float)) or not isinstance(fib_high, (int, float)):
+        return None
+    if not isinstance(fib_low_time, str) or not isinstance(fib_high_time, str):
+        return None
+
+    move = abs(float(fib_high) - float(fib_low))
+    tolerance = max(move * tolerance_ratio, 1e-9)
+    anchor_time = fib_high_time if trend == UPTREND else fib_low_time
+    anchor_index = _find_candle_index_by_timestamp(candles, anchor_time)
+    if anchor_index is None:
+        return None
+
+    candles_after_anchor = candles[anchor_index + 1 :]
+    retraced = False
+    retrace_time: Optional[str] = None
+    retrace_price: Optional[float] = None
+    held: Optional[bool] = None
+
+    if trend == UPTREND:
+        for candle in candles_after_anchor:
+            if candle.low <= float(fib_level) + tolerance:
+                retraced = True
+                retrace_time = candle.timestamp
+                retrace_price = candle.low
+                break
+        if retraced and candles_after_anchor:
+            lowest_after = min(candle.low for candle in candles_after_anchor)
+            held = lowest_after >= (float(fib_level) - tolerance)
+    else:
+        for candle in candles_after_anchor:
+            if candle.high >= float(fib_level) - tolerance:
+                retraced = True
+                retrace_time = candle.timestamp
+                retrace_price = candle.high
+                break
+        if retraced and candles_after_anchor:
+            highest_after = max(candle.high for candle in candles_after_anchor)
+            held = highest_after <= (float(fib_level) + tolerance)
+
+    return {
+        "trend": trend,
+        "fib_38_2": float(fib_level),
+        "fib_low_time": fib_low_time,
+        "fib_low": float(fib_low),
+        "fib_high_time": fib_high_time,
+        "fib_high": float(fib_high),
+        "tolerance": tolerance,
+        "anchor_time": anchor_time,
+        "retraced": retraced,
+        "retrace_time": retrace_time,
+        "retrace_price": retrace_price,
+        "held": held,
+    }
+
+
 def scan_uptrend_fib_hits(swings: list[SwingPoint], tolerance_ratio: float) -> list[FibHit]:
     hits: list[FibHit] = []
     idx = 0
@@ -504,10 +583,24 @@ def analyze_ticker(
         fib_hits = scan_uptrend_fib_hits(swings, tolerance_ratio=tolerance_ratio)
         fib_hits.extend(scan_downtrend_fib_hits(swings, tolerance_ratio=tolerance_ratio))
 
-    last_swing_low = _latest_swing_by_kind(swings, "L")
-    last_swing_high = _latest_swing_by_kind(swings, "H")
+    # Use raw-candle swings for displayed timestamps so highs/lows map to actual OHLC bars.
+    display_swings = detect_swings(candles, pivot_span=pivot_span)
+    display_swing_source = "raw_candles"
+    if not display_swings and pivot_span > 1:
+        display_swings = detect_swings(candles, pivot_span=1)
+    if not display_swings:
+        display_swings = swings
+        display_swing_source = structure_source_name
+
+    last_swing_low = _latest_swing_by_kind(display_swings, "L")
+    last_swing_high = _latest_swing_by_kind(display_swings, "H")
     latest_fib_reference = derive_latest_fib_reference(
-        swings=swings, final_trend=final_trend, fib_hits=fib_hits
+        swings=display_swings, final_trend=final_trend, fib_hits=[]
+    )
+    current_trend_fib_status = evaluate_current_trend_fib_status(
+        candles=candles,
+        fib_reference=latest_fib_reference,
+        tolerance_ratio=tolerance_ratio,
     )
     current_candle = candles[-1]
 
@@ -518,6 +611,8 @@ def analyze_ticker(
         "range_bar_count": len(range_bars),
         "structure_source": structure_source_name,
         "swing_count": len(swings),
+        "display_swing_source": display_swing_source,
+        "display_swing_count": len(display_swings),
         "structure_trend": structure_trend,
         "structure_reason": structure_reason,
         "ema_source": ema_source_name,
@@ -533,6 +628,7 @@ def analyze_ticker(
         "last_swing_low": asdict(last_swing_low) if last_swing_low else None,
         "last_swing_high": asdict(last_swing_high) if last_swing_high else None,
         "last_fib_reference": latest_fib_reference,
+        "current_trend_fib_status": current_trend_fib_status,
         "fib_hit_count": len(fib_hits),
         "fib_hits": [asdict(hit) for hit in fib_hits],
     }
@@ -546,10 +642,12 @@ def _format_price_time(value: Optional[float], timestamp: Optional[str]) -> str:
 
 def print_ticker_terminal_summary(analysis: dict) -> None:
     ticker = analysis.get("ticker", "UNKNOWN")
+    final_trend = analysis.get("final_trend", NEUTRAL)
     last_low = analysis.get("last_swing_low")
     last_high = analysis.get("last_swing_high")
     current = analysis.get("current_price")
     fib_reference = analysis.get("last_fib_reference")
+    fib_status = analysis.get("current_trend_fib_status")
 
     current_text = _format_price_time(
         current.get("price") if isinstance(current, dict) else None,
@@ -579,10 +677,26 @@ def print_ticker_terminal_summary(analysis: dict) -> None:
     else:
         fib_text = "n/a"
 
+    retraced_text = "n/a"
+    held_text = "n/a"
+    retrace_touch_text = "n/a"
+    if isinstance(fib_status, dict):
+        retraced_value = fib_status.get("retraced")
+        held_value = fib_status.get("held")
+        retrace_touch_text = _format_price_time(
+            fib_status.get("retrace_price"), fib_status.get("retrace_time")
+        )
+        retraced_text = "yes" if retraced_value is True else "no"
+        if held_value is True:
+            held_text = "yes"
+        elif held_value is False:
+            held_text = "no"
+
     print(
-        f"{ticker} | Current: {current_text} | "
+        f"{ticker} | Trend: {final_trend} | Current: {current_text} | "
         f"Last Swing Low: {low_text} | Last Swing High: {high_text} | "
-        f"Fib 38.2: {fib_text}"
+        f"Fib 38.2: {fib_text} | Retraced: {retraced_text} "
+        f"(at {retrace_touch_text}) | Held: {held_text}"
     )
 
 

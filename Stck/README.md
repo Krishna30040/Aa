@@ -69,5 +69,6 @@ The JSON output includes per-ticker:
 The script also prints a concise per-ticker line in terminal output showing:
 
 - current price and timestamp
-- last analyzed swing low and swing high with timestamps
+- last analyzed swing low and swing high with timestamps (from raw OHLC candles)
 - latest fib 38.2 level with fib low/high anchors and timestamps
+- for current trend: fib retraced or not, and fib level held or not
