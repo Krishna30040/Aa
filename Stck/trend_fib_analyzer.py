@@ -17,7 +17,7 @@ import argparse
 import csv
 import json
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -395,9 +395,25 @@ def analyze_ticker(
 ) -> dict:
     ticker_range = compute_ticker_range(candles, lookback=range_lookback)
     range_bars = to_range_bars(candles, ticker_range)
-    swings = detect_swings(range_bars, pivot_span=pivot_span)
+
+    # Prefer range bars for swing structure. If there are too few bars/swings,
+    # fall back to raw candles and a tighter pivot span.
+    structure_source_name = "range_bars"
+    structure_source = range_bars
+    if len(structure_source) < (pivot_span * 2 + 1):
+        structure_source_name = "raw_candles"
+        structure_source = candles
+
+    swings = detect_swings(structure_source, pivot_span=pivot_span)
+    if not swings and pivot_span > 1:
+        swings = detect_swings(structure_source, pivot_span=1)
+
     structure_trend, structure_reason = determine_structure_trend(swings)
-    ema_trend, ema_reason, ema50, ema200 = determine_ema_trend(range_bars)
+
+    # EMA is trend smoother; use range bars when enough exist, otherwise raw candles.
+    ema_source_name = "range_bars" if len(range_bars) >= 50 else "raw_candles"
+    ema_source = range_bars if len(range_bars) >= 50 else candles
+    ema_trend, ema_reason, ema50, ema200 = determine_ema_trend(ema_source)
     final_trend = combine_trend(structure_trend, ema_trend)
 
     if final_trend == UPTREND:
@@ -414,9 +430,11 @@ def analyze_ticker(
         "raw_candle_count": len(candles),
         "range_box_size": ticker_range,
         "range_bar_count": len(range_bars),
+        "structure_source": structure_source_name,
         "swing_count": len(swings),
         "structure_trend": structure_trend,
         "structure_reason": structure_reason,
+        "ema_source": ema_source_name,
         "ema_trend": ema_trend,
         "ema_reason": ema_reason,
         "ema50": ema50,
@@ -507,7 +525,9 @@ def main() -> int:
         )
 
     report = {
-        "generated_at_utc": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "generated_at_utc": datetime.now(timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z"),
         "watchlist_file": str(watchlist_path),
         "data_directory": str(data_dir),
         "settings": {
