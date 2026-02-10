@@ -50,6 +50,7 @@ From `Stck/`:
 python trend_fib_analyzer.py \
   --watchlist A.txt \
   --data-dir data \
+  --range-factor 0.25 \
   --output analysis_output.json
 ```
 

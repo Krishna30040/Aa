@@ -123,7 +123,9 @@ def load_ohlc_csv(path: Path) -> list[Candle]:
     return candles
 
 
-def compute_ticker_range(candles: list[Candle], lookback: int = 100) -> float:
+def compute_ticker_range(
+    candles: list[Candle], lookback: int = 100, range_factor: float = 0.25
+) -> float:
     if not candles:
         return 0.0
     sample = candles[-lookback:] if len(candles) > lookback else candles
@@ -135,7 +137,8 @@ def compute_ticker_range(candles: list[Candle], lookback: int = 100) -> float:
         median = ranges[mid]
     else:
         median = (ranges[mid - 1] + ranges[mid]) / 2.0
-    return max(median, 1e-8)
+    box_size = median * max(range_factor, 1e-6)
+    return max(box_size, 1e-8)
 
 
 def to_range_bars(candles: list[Candle], box_size: float) -> list[Candle]:
@@ -176,13 +179,17 @@ def detect_swings(range_bars: list[Candle], pivot_span: int = 2) -> list[SwingPo
         right = range_bars[idx + 1 : idx + pivot_span + 1]
         neighbors = left + right
 
-        if all(curr.high > bar.high for bar in neighbors):
+        if all(curr.high >= bar.high for bar in neighbors) and any(
+            curr.high > bar.high for bar in neighbors
+        ):
             raw.append(
                 SwingPoint(
                     index=idx, timestamp=curr.timestamp, price=curr.high, kind="H"
                 )
             )
-        if all(curr.low < bar.low for bar in neighbors):
+        if all(curr.low <= bar.low for bar in neighbors) and any(
+            curr.low < bar.low for bar in neighbors
+        ):
             raw.append(
                 SwingPoint(index=idx, timestamp=curr.timestamp, price=curr.low, kind="L")
             )
@@ -390,10 +397,13 @@ def analyze_ticker(
     ticker: str,
     candles: list[Candle],
     range_lookback: int,
+    range_factor: float,
     pivot_span: int,
     tolerance_ratio: float,
 ) -> dict:
-    ticker_range = compute_ticker_range(candles, lookback=range_lookback)
+    ticker_range = compute_ticker_range(
+        candles, lookback=range_lookback, range_factor=range_factor
+    )
     range_bars = to_range_bars(candles, ticker_range)
 
     # Prefer range bars for swing structure. If there are too few bars/swings,
@@ -469,6 +479,12 @@ def build_cli() -> argparse.ArgumentParser:
         help="Bars used to compute ticker-specific median range size.",
     )
     parser.add_argument(
+        "--range-factor",
+        type=float,
+        default=0.25,
+        help="Fraction of median ticker range used as range-bar box size.",
+    )
+    parser.add_argument(
         "--pivot-span",
         type=int,
         default=2,
@@ -519,6 +535,7 @@ def main() -> int:
                 ticker=ticker,
                 candles=candles,
                 range_lookback=max(2, args.range_lookback),
+                range_factor=max(1e-6, args.range_factor),
                 pivot_span=max(1, args.pivot_span),
                 tolerance_ratio=max(0.0, args.tolerance),
             )
@@ -532,6 +549,7 @@ def main() -> int:
         "data_directory": str(data_dir),
         "settings": {
             "range_lookback": args.range_lookback,
+            "range_factor": args.range_factor,
             "pivot_span": args.pivot_span,
             "tolerance": args.tolerance,
         },
