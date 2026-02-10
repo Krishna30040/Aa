@@ -328,7 +328,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.05,
         help=(
             "Tolerance around 38.2 retracement in ratio terms. "
-            "Example: 0.05 means acceptable retracement is 38.2% +/- 5.0%."
+            "Example: 0.05 means acceptable retracement is 38.2%% +/- 5.0%%."
         ),
     )
     parser.add_argument(
