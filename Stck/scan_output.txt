@@ -1,0 +1,11 @@
+Stock scan generated: 2026-02-11 05:28:45 UTC
+Data source: Yahoo Finance chart API
+Timeframe: 15-minute candles
+Trend rule: compare close now vs close 8 candles ago
+Fib rule: 38.2% retracement over the most recent 26 candles; HIT means latest 15m candle touched that level
+
+Ticker   Trend      Change%    LastClose   Fib38.2    Hit   Last Candle (UTC)     Note/Error
+--------------------------------------------------------------------------------------------
+AAPL     DOWN         -0.12%       273.68     273.86    NO   2026-02-10 21:00     38.2% retracement from recent down-swing
+MSFT     DOWN         -0.80%       413.27     416.89    NO   2026-02-10 21:00     38.2% retracement from recent down-swing
+TSLA     UP            0.11%       425.21     424.47    NO   2026-02-10 21:00     38.2% retracement from recent up-swing
