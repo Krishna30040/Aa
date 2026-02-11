@@ -5,6 +5,8 @@ import pandas as pd
 import yfinance as yf
 
 FIB_382 = 0.382
+DEFAULT_INTERVAL = "15m"
+DEFAULT_PERIOD = "60d"
 
 
 def fib_382_upmove(swing_low: float, swing_high: float) -> float:
@@ -17,11 +19,11 @@ def fib_382_downmove(swing_low: float, swing_high: float) -> float:
     return swing_low + (swing_high - swing_low) * FIB_382
 
 
-def get_15m_data(ticker: str, period: str = "30d") -> pd.DataFrame:
+def get_15m_data(ticker: str, period: str = DEFAULT_PERIOD, interval: str = DEFAULT_INTERVAL) -> pd.DataFrame:
     df = yf.download(
         tickers=ticker,
         period=period,
-        interval="5m",
+        interval=interval,
         auto_adjust=True,
         progress=False,
         group_by="column",
@@ -515,6 +517,105 @@ def summarize_events(events: list[dict[str, Any]]) -> dict[str, int]:
     }
 
 
+def _iter_trend_segments(df: pd.DataFrame) -> list[tuple[int, int, str]]:
+    """
+    Split the full dataframe into EMA-regime segments.
+    Each segment is tagged as Uptrend/Downtrend based on EMA20 vs EMA50.
+    """
+    if df.empty or len(df) < 5:
+        return []
+
+    above = (df["EMA20"] > df["EMA50"]).astype(int)
+    cross = above.diff().fillna(0).abs()
+
+    starts = [0]
+    for label in cross[cross == 1].index:
+        starts.append(int(df.index.get_loc(label)))
+
+    starts = sorted(set(starts))
+    segments: list[tuple[int, int, str]] = []
+
+    for i, start in enumerate(starts):
+        end = (starts[i + 1] - 1) if i + 1 < len(starts) else (len(df) - 1)
+        if end <= start:
+            continue
+
+        ema20 = float(df["EMA20"].iloc[end])
+        ema50 = float(df["EMA50"].iloc[end])
+        if ema20 > ema50:
+            trend = "Uptrend"
+        elif ema20 < ema50:
+            trend = "Downtrend"
+        else:
+            continue
+        segments.append((start, end, trend))
+
+    return segments
+
+
+def backtest_fib_382_accuracy(
+    df: pd.DataFrame,
+    min_move_pct: float = 3.0,
+    level_tolerance_pct: float = 0.10,
+) -> dict[str, Any]:
+    """
+    Estimate historical accuracy from resolved 38.2 retracement events.
+
+    Accuracy is measured as:
+      held / (held + not_held + invalid)
+    where invalid means setup got structurally invalidated.
+    """
+    if df is None or df.empty or len(df) < 50:
+        return {
+            "BacktestSetups": 0,
+            "BacktestHeld": 0,
+            "BacktestNotHeld": 0,
+            "BacktestInvalid": 0,
+            "BacktestFailed": 0,
+            "EstimatedAccuracyPct": None,
+        }
+
+    held = 0
+    not_held = 0
+    invalid = 0
+
+    for start, end, trend in _iter_trend_segments(df):
+        seg = df.iloc[start : end + 1].copy()
+        if len(seg) < 10:
+            continue
+
+        events, _ = scan_fib_382_levels(
+            seg,
+            trend=trend,
+            min_move_pct=min_move_pct,
+            level_tolerance_pct=level_tolerance_pct,
+        )
+        for event in events:
+            status = str(event.get("Status", ""))
+            if status == "Held":
+                held += 1
+            elif status == "NotHeld":
+                not_held += 1
+            elif status.startswith("Invalid"):
+                invalid += 1
+
+    failed = not_held + invalid
+    setups = held + failed
+    if setups > 0:
+        accuracy_pct = (held / setups) * 100.0
+    else:
+        accuracy_pct = None
+
+    return {
+        "BacktestSetups": setups,
+        "BacktestHeld": held,
+        "BacktestNotHeld": not_held,
+        "BacktestInvalid": invalid,
+        "BacktestFailed": failed,
+        "EstimatedAccuracyPct": None if accuracy_pct is None else round(accuracy_pct, 4),
+    }
+
+
 def _analyze_ticker_core(
     ticker: str,
     tolerance_pct: float,
@@ -522,12 +623,14 @@ def _analyze_ticker_core(
     min_trend_segment_bars: int,
     min_move_pct: float,
     level_tolerance_pct: float,
+    accuracy_threshold_pct: float,
+    min_tested_setups: int,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any] | None]:
     ticker = ticker.strip().upper()
     if not ticker:
         return {"Ticker": "", "Error": "Empty ticker"}, [], None
 
-    df = get_15m_data(ticker, period=period)
+    df = get_15m_data(ticker, period=period, interval=DEFAULT_INTERVAL)
     if df.empty or len(df) < 60:
         return {"Ticker": ticker, "Error": "Not enough data"}, [], None
 
@@ -565,6 +668,17 @@ def _analyze_ticker_core(
     )
     stats = summarize_events(events)
     latest_event = events[-1] if events else None
+    backtest = backtest_fib_382_accuracy(
+        df,
+        min_move_pct=min_move_pct,
+        level_tolerance_pct=level_tolerance_pct,
+    )
+    estimated_accuracy = backtest["EstimatedAccuracyPct"]
+    passes_accuracy = (
+        estimated_accuracy is not None
+        and backtest["BacktestSetups"] >= min_tested_setups
+        and float(estimated_accuracy) >= accuracy_threshold_pct
+    )
 
     summary = {
         "Ticker": ticker,
@@ -588,6 +702,16 @@ def _analyze_ticker_core(
         "ActiveLevelStatus": "" if active is None else active["Status"],
         "ActiveFib38.2": None if active is None else active["Fib38.2"],
         "ActiveMovePct": None if active is None else active["MovePct"],
+        "BacktestSetups": int(backtest["BacktestSetups"]),
+        "BacktestHeld": int(backtest["BacktestHeld"]),
+        "BacktestNotHeld": int(backtest["BacktestNotHeld"]),
+        "BacktestInvalid": int(backtest["BacktestInvalid"]),
+        "BacktestFailed": int(backtest["BacktestFailed"]),
+        "EstimatedAccuracyPct": estimated_accuracy,
+        "AccuracyThresholdPct": round(float(accuracy_threshold_pct), 4),
+        "MinTestedSetups": int(min_tested_setups),
+        "PassesAccuracyFilter": bool(passes_accuracy),
+        "QualifiedSignal": bool(hit and passes_accuracy),
         "Error": "",
     }
 
@@ -597,10 +721,12 @@ def _analyze_ticker_core(
 def analyze_ticker(
     ticker: str,
     tolerance_pct: float = 0.30,
-    period: str = "30d",
+    period: str = DEFAULT_PERIOD,
     min_trend_segment_bars: int = 120,
     min_move_pct: float = 3.0,
     level_tolerance_pct: float = 0.10,
+    accuracy_threshold_pct: float = 90.0,
+    min_tested_setups: int = 8,
 ) -> dict[str, Any]:
     summary, _, _ = _analyze_ticker_core(
         ticker=ticker,
@@ -609,6 +735,8 @@ def analyze_ticker(
         min_trend_segment_bars=min_trend_segment_bars,
         min_move_pct=min_move_pct,
         level_tolerance_pct=level_tolerance_pct,
+        accuracy_threshold_pct=accuracy_threshold_pct,
+        min_tested_setups=min_tested_setups,
     )
     return summary
 
@@ -616,10 +744,12 @@ def analyze_ticker(
 def screen_all(
     tickers: list[str],
     tolerance_pct: float = 0.30,
-    period: str = "30d",
+    period: str = DEFAULT_PERIOD,
     min_trend_segment_bars: int = 120,
     min_move_pct: float = 3.0,
     level_tolerance_pct: float = 0.10,
+    accuracy_threshold_pct: float = 90.0,
+    min_tested_setups: int = 8,
 ) -> pd.DataFrame:
     rows = []
     for t in tickers:
@@ -631,12 +761,31 @@ def screen_all(
                 min_trend_segment_bars=min_trend_segment_bars,
                 min_move_pct=min_move_pct,
                 level_tolerance_pct=level_tolerance_pct,
+                accuracy_threshold_pct=accuracy_threshold_pct,
+                min_tested_setups=min_tested_setups,
             )
         )
 
     df_out = pd.DataFrame(rows)
 
-    if "DistancePct" in df_out.columns and "Hit" in df_out.columns:
+    if (
+        "QualifiedSignal" in df_out.columns
+        and "PassesAccuracyFilter" in df_out.columns
+        and "DistancePct" in df_out.columns
+    ):
+        df_out = df_out.sort_values(
+            by=[
+                "QualifiedSignal",
+                "PassesAccuracyFilter",
+                "Hit",
+                "EstimatedAccuracyPct",
+                "DistancePct",
+                "Ticker",
+            ],
+            ascending=[False, False, False, False, True, True],
+            na_position="last",
+        ).reset_index(drop=True)
+    elif "DistancePct" in df_out.columns and "Hit" in df_out.columns:
         df_out = df_out.sort_values(
             by=["Hit", "DistancePct", "Ticker"],
             ascending=[False, True, True],
@@ -649,10 +798,12 @@ def screen_all(
 def screen_all_with_event_log(
     tickers: list[str],
     tolerance_pct: float = 0.30,
-    period: str = "30d",
+    period: str = DEFAULT_PERIOD,
     min_trend_segment_bars: int = 120,
     min_move_pct: float = 3.0,
     level_tolerance_pct: float = 0.10,
+    accuracy_threshold_pct: float = 90.0,
+    min_tested_setups: int = 8,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     summary_rows: list[dict[str, Any]] = []
     event_rows: list[dict[str, Any]] = []
@@ -665,6 +816,8 @@ def screen_all_with_event_log(
             min_trend_segment_bars=min_trend_segment_bars,
             min_move_pct=min_move_pct,
             level_tolerance_pct=level_tolerance_pct,
+            accuracy_threshold_pct=accuracy_threshold_pct,
+            min_tested_setups=min_tested_setups,
         )
         summary_rows.append(summary)
 
@@ -675,7 +828,24 @@ def screen_all_with_event_log(
             event_rows.append({"Ticker": summary.get("Ticker", t), **active})
 
     summary_df = pd.DataFrame(summary_rows)
-    if "DistancePct" in summary_df.columns and "Hit" in summary_df.columns:
+    if (
+        "QualifiedSignal" in summary_df.columns
+        and "PassesAccuracyFilter" in summary_df.columns
+        and "DistancePct" in summary_df.columns
+    ):
+        summary_df = summary_df.sort_values(
+            by=[
+                "QualifiedSignal",
+                "PassesAccuracyFilter",
+                "Hit",
+                "EstimatedAccuracyPct",
+                "DistancePct",
+                "Ticker",
+            ],
+            ascending=[False, False, False, False, True, True],
+            na_position="last",
+        ).reset_index(drop=True)
+    elif "DistancePct" in summary_df.columns and "Hit" in summary_df.columns:
         summary_df = summary_df.sort_values(
             by=["Hit", "DistancePct", "Ticker"],
             ascending=[False, True, True],
@@ -706,13 +876,25 @@ if __name__ == "__main__":
     result_df, events_df = screen_all_with_event_log(
         watchlist,
         tolerance_pct=0.30,
-        period="30d",
+        period=DEFAULT_PERIOD,
         min_trend_segment_bars=120,
         min_move_pct=3.0,
         level_tolerance_pct=0.10,
+        accuracy_threshold_pct=90.0,
+        min_tested_setups=8,
     )
 
     print(result_df.to_string(index=False))
+
+    if "QualifiedSignal" in result_df.columns:
+        qualified_df = result_df[result_df["QualifiedSignal"] == True].copy()
+        print("\nQualified 15m Fib 38.2 signals (near level + >=90% estimated accuracy):")
+        if qualified_df.empty:
+            print("No qualified signals right now.")
+        else:
+            print(qualified_df.to_string(index=False))
+    else:
+        qualified_df = pd.DataFrame()
 
     if not events_df.empty:
         print("\n38.2 level lifecycle events (impulse >= 3%):")
@@ -724,6 +906,12 @@ if __name__ == "__main__":
         for ticker in hits_df["Ticker"]:
             f.write(f"{ticker}\n")
     print("\nSaved hit tickers to:", output_file)
+
+    qualified_file = os.path.join(script_dir, "fib382_15m_90pct_candidates.txt")
+    with open(qualified_file, "w", encoding="utf-8") as f:
+        for ticker in qualified_df.get("Ticker", []):
+            f.write(f"{ticker}\n")
+    print("Saved qualified tickers to:", qualified_file)
 
     events_file = os.path.join(script_dir, "fib382_events.csv")
     if not events_df.empty:
