@@ -52,7 +52,8 @@ limited to about 60 days). The script automatically clamps period to Yahoo's
 allowed range and prints the effective period used.
 
 The script prefers ZigZag swing detection (`zigzag` package) and will fall back
-to local pivot-based detection only if ZigZag is unavailable.
+to a built-in ZigZag-compatible implementation if the external package is not
+available.
 
 ## Install and run
 

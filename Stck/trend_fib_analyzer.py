@@ -247,6 +247,89 @@ def detect_swings_pivot(candles: list[Candle], pivot_span: int = 2) -> list[Swin
     return filtered
 
 
+def _identify_initial_pivot(
+    prices: np.ndarray, up_thresh: float, down_thresh: float
+) -> int:
+    peak = 1
+    valley = -1
+    x0 = prices[0]
+    max_x = x0
+    min_x = x0
+    max_t = 0
+    min_t = 0
+    up_ratio = 1.0 + up_thresh
+    down_ratio = 1.0 + down_thresh
+
+    for idx in range(1, len(prices)):
+        x = prices[idx]
+        if x / min_x >= up_ratio:
+            return valley if min_t == 0 else peak
+        if x / max_x <= down_ratio:
+            return peak if max_t == 0 else valley
+        if x > max_x:
+            max_x = x
+            max_t = idx
+        if x < min_x:
+            min_x = x
+            min_t = idx
+
+    return valley if x0 < prices[-1] else peak
+
+
+def peak_valley_pivots_local(
+    prices: np.ndarray, up_thresh: float, down_thresh: float
+) -> np.ndarray:
+    # ZigZag-compatible threshold pivot detection (percent-based).
+    if prices.size == 0:
+        return np.zeros(0, dtype=np.int8)
+    if up_thresh <= 0:
+        raise ValueError("up_thresh must be positive")
+    if down_thresh >= 0:
+        raise ValueError("down_thresh must be negative")
+
+    peak = 1
+    valley = -1
+    pivots = np.zeros(prices.size, dtype=np.int8)
+    initial_pivot = _identify_initial_pivot(prices, up_thresh, down_thresh)
+    pivots[0] = initial_pivot
+
+    trend = -initial_pivot
+    last_pivot_idx = 0
+    last_pivot_price = prices[0]
+    up_ratio = 1.0 + up_thresh
+    down_ratio = 1.0 + down_thresh
+
+    for idx in range(1, prices.size):
+        price = prices[idx]
+        ratio = price / last_pivot_price
+
+        if trend == peak:
+            if ratio <= down_ratio:
+                pivots[last_pivot_idx] = trend
+                trend = valley
+                last_pivot_idx = idx
+                last_pivot_price = price
+            elif price > last_pivot_price:
+                last_pivot_idx = idx
+                last_pivot_price = price
+        else:
+            if ratio >= up_ratio:
+                pivots[last_pivot_idx] = trend
+                trend = peak
+                last_pivot_idx = idx
+                last_pivot_price = price
+            elif price < last_pivot_price:
+                last_pivot_idx = idx
+                last_pivot_price = price
+
+    if last_pivot_idx == prices.size - 1:
+        pivots[last_pivot_idx] = trend
+    elif pivots[-1] == 0:
+        pivots[-1] = -trend
+
+    return pivots
+
+
 def detect_swings_zigzag(
     candles: list[Candle], reversal_pct: float = ZIGZAG_REVERSAL_PCT
 ) -> list[SwingPoint]:
@@ -254,14 +337,17 @@ def detect_swings_zigzag(
         return []
     if reversal_pct <= 0:
         return []
-    if peak_valley_pivots is None:
-        return []
 
     close_prices = np.array([bar.close for bar in candles], dtype=float)
     if close_prices.size < 3:
         return []
-
-    pivots = peak_valley_pivots(close_prices, reversal_pct, -reversal_pct)
+    try:
+        if peak_valley_pivots is not None:
+            pivots = peak_valley_pivots(close_prices, reversal_pct, -reversal_pct)
+        else:
+            pivots = peak_valley_pivots_local(close_prices, reversal_pct, -reversal_pct)
+    except Exception:
+        return []
     swings: list[SwingPoint] = []
     for idx, marker in enumerate(pivots):
         if marker == 1:
@@ -649,10 +735,8 @@ def analyze_ticker(
     )
     range_bars = to_range_bars(candles, ticker_range)
 
-    zigzag_enabled = peak_valley_pivots is not None
-    structure_source_name = (
-        "zigzag_raw_candles" if zigzag_enabled else "pivot_raw_candles_fallback"
-    )
+    zigzag_engine = "zigzag_package" if peak_valley_pivots is not None else "zigzag_local"
+    structure_source_name = f"zigzag_raw_candles:{zigzag_engine}"
     swings = detect_swings(
         candles,
         pivot_span=pivot_span,
@@ -660,9 +744,7 @@ def analyze_ticker(
     )
     # Last-resort fallback in difficult data so analysis still runs.
     if not swings and range_bars:
-        structure_source_name = (
-            "zigzag_range_bars" if zigzag_enabled else "pivot_range_bars_fallback"
-        )
+        structure_source_name = f"zigzag_range_bars:{zigzag_engine}"
         swings = detect_swings(
             range_bars,
             pivot_span=pivot_span,
@@ -834,8 +916,8 @@ def main() -> int:
         )
     if peak_valley_pivots is None:
         print(
-            "ZigZag package not available. Falling back to local pivot swing detection. "
-            "Install requirements.txt to enable ZigZag swings."
+            "ZigZag package not available. Using built-in ZigZag-compatible "
+            "swing detection."
         )
 
     missing_or_failed: list[str] = []
@@ -881,7 +963,8 @@ def main() -> int:
             "zigzag_reversal_pct": ZIGZAG_REVERSAL_PCT,
             "tolerance": FIB_TOLERANCE,
         },
-        "zigzag_available": peak_valley_pivots is not None,
+        "zigzag_package_available": peak_valley_pivots is not None,
+        "zigzag_engine_used": "zigzag_package" if peak_valley_pivots is not None else "zigzag_local",
         "analyzed_ticker_count": len(analyses),
         "missing_or_failed_tickers": missing_or_failed,
         "results": analyses,
