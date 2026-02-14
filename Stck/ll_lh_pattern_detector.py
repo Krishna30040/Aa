@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Sequence
+from urllib.parse import quote, urlencode
+from urllib.request import Request, urlopen
 
 
 @dataclass(frozen=True)
@@ -191,6 +195,90 @@ def load_ohlc_csv(path: Path) -> list[Candle]:
     return rows
 
 
+def parse_yahoo_chart_payload(payload: dict) -> list[Candle]:
+    """Converts Yahoo chart API JSON payload to Candle objects."""
+    chart = payload.get("chart") if isinstance(payload, dict) else None
+    if not isinstance(chart, dict):
+        raise ValueError("Unexpected Yahoo response format")
+
+    error = chart.get("error")
+    if error:
+        if isinstance(error, dict):
+            description = error.get("description") or "unknown error"
+        else:
+            description = str(error)
+        raise ValueError(f"Yahoo returned an error: {description}")
+
+    results = chart.get("result")
+    if not results or not isinstance(results, list):
+        raise ValueError("Yahoo response has no chart result")
+
+    result = results[0]
+    timestamps = result.get("timestamp") or []
+    indicators = result.get("indicators") or {}
+    quotes = indicators.get("quote") or []
+    quote_data = quotes[0] if quotes else {}
+
+    highs = quote_data.get("high") or []
+    lows = quote_data.get("low") or []
+    opens = quote_data.get("open") or []
+    closes = quote_data.get("close") or []
+
+    candles: list[Candle] = []
+    for source_idx, ts in enumerate(timestamps):
+        if ts is None:
+            continue
+
+        high = highs[source_idx] if source_idx < len(highs) else None
+        low = lows[source_idx] if source_idx < len(lows) else None
+        if high is None or low is None:
+            # Yahoo may emit sparse rows during halted/off-session intervals.
+            continue
+
+        open_ = opens[source_idx] if source_idx < len(opens) else None
+        close = closes[source_idx] if source_idx < len(closes) else None
+
+        ts_iso = datetime.fromtimestamp(int(ts), tz=timezone.utc).isoformat()
+        candles.append(
+            Candle(
+                index=len(candles),
+                timestamp=ts_iso,
+                open=float(open_) if open_ is not None else float(low),
+                high=float(high),
+                low=float(low),
+                close=float(close) if close is not None else float(high),
+            )
+        )
+
+    if not candles:
+        raise ValueError("Yahoo response did not contain usable OHLC candles")
+
+    return candles
+
+
+def fetch_yahoo_ohlc(symbol: str, interval: str = "1h", range_: str = "3mo") -> list[Candle]:
+    """Downloads OHLC candles for a ticker from Yahoo Finance chart API."""
+    cleaned_symbol = symbol.strip().upper()
+    if not cleaned_symbol:
+        raise ValueError("symbol cannot be empty")
+
+    query = urlencode(
+        {
+            "range": range_,
+            "interval": interval,
+            "includePrePost": "false",
+            "events": "history",
+        }
+    )
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{quote(cleaned_symbol)}?{query}"
+
+    request = Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urlopen(request, timeout=30) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+
+    return parse_yahoo_chart_payload(payload)
+
+
 def build_demo_candles() -> list[Candle]:
     """
     Synthetic candles that contain one LL, LH, LL, LH, LL sequence
@@ -240,19 +328,48 @@ def main() -> None:
         type=Path,
         help="Path to CSV with at least high,low columns (optional open,close,timestamp).",
     )
+    parser.add_argument(
+        "--demo",
+        action="store_true",
+        help="Use built-in synthetic candles instead of Yahoo/CSV.",
+    )
+    parser.add_argument(
+        "--symbol",
+        default="NVDA",
+        help="Yahoo ticker symbol to scan (default: NVDA).",
+    )
+    parser.add_argument(
+        "--interval",
+        default="1h",
+        help="Yahoo interval (examples: 5m, 15m, 1h, 1d).",
+    )
+    parser.add_argument(
+        "--range",
+        dest="range_",
+        default="3mo",
+        help="Yahoo lookback range (examples: 1mo, 3mo, 6mo, 1y).",
+    )
     parser.add_argument("--left", type=int, default=2, help="Bars to the left for pivot detection.")
     parser.add_argument("--right", type=int, default=2, help="Bars to the right for pivot detection.")
     args = parser.parse_args()
 
     if args.csv:
+        if args.demo:
+            parser.error("Use either --csv or --demo, not both.")
         candles = load_ohlc_csv(args.csv)
-    else:
+        source_label = f"CSV:{args.csv}"
+    elif args.demo:
         candles = build_demo_candles()
+        source_label = "demo candles"
         # Demo data is built around 1-bar pivots.
         if args.left == 2 and args.right == 2:
             args.left = 1
             args.right = 1
+    else:
+        candles = fetch_yahoo_ohlc(args.symbol, interval=args.interval, range_=args.range_)
+        source_label = f"Yahoo {args.symbol.upper()} ({args.interval}, {args.range_})"
 
+    print(f"Loaded {len(candles)} candles from {source_label}.")
     matches = find_ll_lh_ll_lh_ll(candles, left_bars=args.left, right_bars=args.right)
     print_matches(matches)
 

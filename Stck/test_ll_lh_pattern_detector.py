@@ -4,7 +4,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from ll_lh_pattern_detector import Candle, build_demo_candles, find_ll_lh_ll_lh_ll
+from ll_lh_pattern_detector import (
+    Candle,
+    build_demo_candles,
+    find_ll_lh_ll_lh_ll,
+    parse_yahoo_chart_payload,
+)
 
 
 class LlLhPatternDetectorTests(unittest.TestCase):
@@ -22,6 +27,35 @@ class LlLhPatternDetectorTests(unittest.TestCase):
         ]
         matches = find_ll_lh_ll_lh_ll(candles, left_bars=1, right_bars=1)
         self.assertEqual([], matches)
+
+    def test_parse_yahoo_payload_skips_sparse_rows(self) -> None:
+        payload = {
+            "chart": {
+                "result": [
+                    {
+                        "timestamp": [1700000000, 1700003600, 1700007200],
+                        "indicators": {
+                            "quote": [
+                                {
+                                    "open": [1.0, None, 3.0],
+                                    "high": [2.0, None, 4.0],
+                                    "low": [0.5, None, 2.5],
+                                    "close": [1.5, None, 3.5],
+                                }
+                            ]
+                        },
+                    }
+                ],
+                "error": None,
+            }
+        }
+
+        candles = parse_yahoo_chart_payload(payload)
+        self.assertEqual(2, len(candles))
+        self.assertEqual(0, candles[0].index)
+        self.assertEqual(1, candles[1].index)
+        self.assertAlmostEqual(2.0, candles[0].high)
+        self.assertAlmostEqual(2.5, candles[1].low)
 
 
 if __name__ == "__main__":
